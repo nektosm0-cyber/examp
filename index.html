@@ -8,29 +8,158 @@
     body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
     textarea { box-sizing: border-box; display: block; width: 100%; margin: .5rem 0; padding: .5rem; font: inherit; }
     button { padding: .4rem .8rem; font: inherit; }
-    pre { white-space: pre-wrap; }
+    button:disabled { cursor: wait; opacity: .7; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .error { color: #b00020; }
+    #result { margin-top: 1.5rem; padding: 1rem; border: 1px solid #ccc; border-radius: .5rem; }
+    #result[data-state="manual_review"] { border-color: #b00020; background: #fff5f5; }
+    #result-topic { margin-bottom: .75rem; }
   </style>
 </head>
 <body>
-  <h1>Входящие заявки</h1>
-  <form>
-    <label for="message">Текст заявки</label>
-    <textarea id="message" rows="4"></textarea>
-    <button type="submit">Разобрать заявку</button>
-  </form>
-  <pre id="result" aria-live="polite"></pre>
+  <main>
+    <h1>Входящие заявки</h1>
+    <form id="triage-form">
+      <label for="message">Текст заявки</label>
+      <textarea id="message" rows="4" required></textarea>
+      <p id="form-error" class="error" role="alert" hidden></p>
+      <button type="submit">Разобрать заявку</button>
+    </form>
+
+    <section id="result" aria-live="polite" hidden>
+      <h2 id="result-status"></h2>
+      <p id="result-topic"></p>
+      <section id="draft-section" hidden>
+        <h3>Черновик ответа</h3>
+        <pre id="draft"></pre>
+      </section>
+    </section>
+  </main>
+
   <script type="module">
-    const form = document.querySelector("form");
+    const form = document.querySelector("#triage-form");
+    const message = document.querySelector("#message");
+    const submit = form.querySelector("button");
+    const formError = document.querySelector("#form-error");
     const result = document.querySelector("#result");
+    const resultStatus = document.querySelector("#result-status");
+    const resultTopic = document.querySelector("#result-topic");
+    const draftSection = document.querySelector("#draft-section");
+    const draft = document.querySelector("#draft");
+
+    const topicNames = {
+      delivery: "Доставка",
+      pricing: "Цены",
+      other: "Другое",
+    };
+
+    function clearDraft() {
+      draft.textContent = "";
+      draftSection.hidden = true;
+    }
+
+    function hideResult() {
+      result.hidden = true;
+      resultStatus.textContent = "";
+      resultTopic.textContent = "";
+      clearDraft();
+    }
+
+    function showFormError(text) {
+      formError.textContent = text;
+      formError.hidden = false;
+    }
+
+    function clearFormError() {
+      formError.textContent = "";
+      formError.hidden = true;
+    }
+
+    function showReady(data) {
+      result.dataset.state = "ready";
+      result.hidden = false;
+      resultStatus.textContent = "Готово: заявка разобрана.";
+      resultTopic.textContent = `Тема: ${topicNames[data.topic]}`;
+      clearDraft();
+      draft.textContent = data.draft;
+      draftSection.hidden = false;
+    }
+
+    function showManualReview(reason) {
+      result.dataset.state = "manual_review";
+      result.hidden = false;
+      resultStatus.textContent = "Нужен ручной разбор.";
+      resultTopic.textContent = reason;
+      clearDraft();
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const reply = await fetch("/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: document.querySelector("#message").value }),
-      });
-      result.textContent = JSON.stringify(await reply.json(), null, 2);
+      clearFormError();
+      hideResult();
+
+      const text = message.value.trim();
+      if (!text) {
+        showFormError("Введите текст заявки — пустую заявку нельзя разобрать.");
+        message.focus();
+        return;
+      }
+
+      submit.disabled = true;
+      submit.textContent = "Разбираем…";
+
+      try {
+        const response = await fetch("/api/triage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: AbortSignal.timeout(5000),
+        });
+
+        let data = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+
+        if (response.status === 400 && data?.status === "invalid_input") {
+          showFormError("Проверьте текст заявки: он не должен быть пустым.");
+          return;
+        }
+
+        if (!response.ok) {
+          showManualReview("Сервис разбора недоступен. Проверьте заявку вручную.");
+          return;
+        }
+
+        if (
+          data?.status === "ready" &&
+          Object.hasOwn(topicNames, data.topic) &&
+          typeof data.draft === "string" &&
+          data.draft.trim() !== ""
+        ) {
+          showReady(data);
+          return;
+        }
+
+        showManualReview(
+          "Автоматический разбор не удался (таймаут или некорректный ответ модели). Проверьте заявку вручную."
+        );
+      } catch (error) {
+        const timedOut = error instanceof DOMException && error.name === "TimeoutError";
+        showManualReview(
+          timedOut
+            ? "Сервис не ответил вовремя. Проверьте заявку вручную."
+            : "Не удалось связаться с сервисом. Проверьте заявку вручную."
+        );
+      } finally {
+        submit.disabled = false;
+        submit.textContent = "Разобрать заявку";
+      }
     });
+
+    message.addEventListener("input", clearFormError);
   </script>
 </body>
 </html>
